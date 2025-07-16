@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Monitoring Aktivitas Siswa - MQTT</title>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 30px;
+      background: linear-gradient(to right, #e0f7fa, #e0f2f1);
+    }
+
+    h2 {
+      color: #004d40;
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: auto;
+      background: white;
+      border-radius: 15px;
+      padding: 25px 30px;
+      box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+    }
+
+    .item {
+      display: flex;
+      justify-content: space-between;
+      margin: 15px 0;
+    }
+
+    .label {
+      font-size: 18px;
+      font-weight: 600;
+      color: #00796B;
+    }
+
+    .value {
+      font-size: 22px;
+      font-weight: bold;
+      color: #004d40;
+    }
+
+    canvas {
+      margin-top: 20px;
+    }
+
+    #absenList {
+      margin-top: 20px;
+      border: 1px solid #ccc;
+      border-radius: 10px;
+      padding: 10px;
+      background: #f9f9f9;
+    }
+
+    #absenList h3 {
+      margin-top: 0;
+      color: #00796B;
+    }
+
+    #absenList ul {
+      list-style-type: decimal;
+      padding-left: 20px;
+    }
+
+    /* ✅ Toast Notification */
+    .toast {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background-color: #e0f2f1;
+      color: #00695c;
+      padding: 12px 18px;
+      border-radius: 8px;
+      box-shadow: 0 3px 8px rgba(0,0,0,0.2);
+      z-index: 1000;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      animation: fadeOut 5s forwards;
+    }
+
+    .toast.error {
+      background-color: #ffebee;
+      color: #c62828;
+    }
+
+    @keyframes fadeOut {
+      0% { opacity: 1; }
+      80% { opacity: 1; }
+      100% { opacity: 0; transform: translateX(100px); }
+    }
+  </style>
+</head>
+<body>
+  <h2>🔍 Monitoring Aktivitas Siswa (Real-Time)</h2>
+  <div class="container">
+    <div class="item"><div class="label">📷 Cahaya (LDR)</div><div class="value" id="ldr">-</div></div>
+    <div class="item"><div class="label">🕵️ Gerakan (PIR)</div><div class="value" id="motion">-</div></div>
+
+    <canvas id="chartLDR" width="400" height="150"></canvas>
+    <canvas id="chartPIR" width="400" height="150"></canvas>
+
+    <div id="absenList">
+      <h3>📋 Daftar Absensi (RFID)</h3>
+      <ul id="absenData"></ul>
+    </div>
+  </div>
+
+  <script>
+    const broker = 'wss://broker.hivemq.com:8884/mqtt';
+    const topic = 'vokasi/sensor';
+    const client = mqtt.connect(broker);
+
+    const ldrValues = [];
+    const motionValues = [];
+    const maxPoints = 10;
+
+    const knownRFIDs = {
+      "3B6DC905": "Siswa 1 - Budi",
+      "23456789": "Siswa 2 - Ani",
+      "34567890": "Siswa 3 - Rudi",
+      "45678901": "Siswa 4 - Siti"
+    };
+
+    const hadir = new Set();
+
+    const ctxLDR = document.getElementById('chartLDR').getContext('2d');
+    const ctxPIR = document.getElementById('chartPIR').getContext('2d');
+
+    const chartLDR = new Chart(ctxLDR, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Cahaya (LDR)',
+          data: [],
+          borderColor: '#00796B',
+          backgroundColor: 'rgba(0, 150, 136, 0.2)',
+          fill: true
+        }]
+      },
+      options: {
+        scales: {
+          y: { beginAtZero: true }
+        }
+      }
+    });
+
+    const chartPIR = new Chart(ctxPIR, {
+      type: 'bar',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Deteksi Gerakan (PIR)',
+          data: [],
+          backgroundColor: '#4db6ac'
+        }]
+      },
+      options: {
+        scales: {
+          y: { beginAtZero: true, max: 1 }
+        }
+      }
+    });
+
+    function showToast(message, type = '') {
+      const toast = document.createElement('div');
+      toast.className = 'toast' + (type === 'error' ? ' error' : '');
+      toast.innerHTML = type === 'error' ? '❌ ' + message : '✅ ' + message;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 5000); // Hapus setelah 5 detik
+    }
+
+    function updateAbsensi(uidRaw) {
+      const uid = uidRaw.trim();
+      if (!hadir.has(uid)) {
+        hadir.add(uid);
+        const ul = document.getElementById('absenData');
+        const li = document.createElement('li');
+        li.innerText = knownRFIDs[uid] || `UID Tidak Dikenal: ${uid}`;
+        ul.appendChild(li);
+        if (!knownRFIDs[uid]) {
+          console.warn(`❗ Tambahkan UID ini ke daftar: "${uid}"`);
+        }
+      }
+    }
+
+    function updateChart(chart, dataArray, labelArray, newValue) {
+      const time = new Date().toLocaleTimeString();
+      if (dataArray.length >= maxPoints) {
+        dataArray.shift();
+        labelArray.shift();
+      }
+      dataArray.push(newValue);
+      labelArray.push(time);
+      chart.data.labels = labelArray;
+      chart.data.datasets[0].data = dataArray;
+      chart.update();
+    }
+
+    client.on('connect', () => {
+      showToast('Terhubung ke broker MQTT');
+      client.subscribe(topic);
+    });
+
+    client.on('message', (topic, message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        const ldr = parseInt(data.ldr) || 0;
+        const motion = data.motion === 1 ? 1 : 0;
+        const rfid = data.rfid || '';
+
+        document.getElementById('ldr').innerText = ldr;
+        document.getElementById('motion').innerText = motion === 1 ? 'Terdeteksi' : 'Tidak ada';
+
+        updateChart(chartLDR, ldrValues, chartLDR.data.labels, ldr);
+        updateChart(chartPIR, motionValues, chartPIR.data.labels, motion);
+
+        if (rfid) updateAbsensi(rfid);
+
+        console.log('📩 Pesan masuk:', data);
+      } catch (e) {
+        console.warn('⚠️ Gagal parsing pesan:', e);
+      }
+    });
+
+    client.on('error', () => {
+      showToast('Gagal koneksi ke broker', 'error');
+    });
+  </script>
+</body>
+</html>
